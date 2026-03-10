@@ -46,6 +46,19 @@ router.get('/my', requireAuth, async (req, res) => {
 router.get('/resolve/:code', async (req, res) => {
   const code = req.params.code.toUpperCase()
 
+  // Check invite_codes table first
+  const { data: invite } = await supabase
+    .from('invite_codes')
+    .select('id, owner_fid, is_used')
+    .eq('code', code)
+    .single()
+
+  if (invite) {
+    if (invite.is_used) return res.status(403).json({ valid: false, error: 'This code has already been used' })
+    return res.json({ valid: true, slots_left: 1, invite_id: invite.id, owner_fid: invite.owner_fid })
+  }
+
+  // Fall back to active_invite_code on users table
   const { data: user } = await supabase
     .from('users')
     .select('fid, username, display_name, pfp_url, tier, invite_slots, invites_used, active_invite_code')

@@ -31,20 +31,40 @@ router.post('/register', async (req, res) => {
     return res.status(403).json({ error: 'Invite code required — get one from an existing member' })
   }
 
-  // Validate invite code against active_invite_code
-  const { data: referrer } = await supabase
-    .from('users')
-    .select('id, tier, invite_slots, invites_used, active_invite_code')
-    .eq('active_invite_code', invite_code.toUpperCase())
+  // Check invite_codes table first
+  const { data: invite } = await supabase
+    .from('invite_codes')
+    .select('id, owner_fid, is_used')
+    .eq('code', invite_code.toUpperCase())
     .single()
+
+  let referrer = null
+
+  if (invite) {
+    if (invite.is_used) {
+      return res.status(403).json({ error: 'This invite code has already been used' })
+    }
+    // Get owner as referrer
+    const { data: owner } = await supabase
+      .from('users')
+      .select('id, tier, invite_slots, invites_used, active_invite_code')
+      .eq('fid', invite.owner_fid)
+      .single()
+    referrer = owner
+  } else {
+    // Fall back to active_invite_code
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, tier, invite_slots, invites_used, active_invite_code')
+      .eq('active_invite_code', invite_code.toUpperCase())
+      .single()
+    if (!user) return res.status(403).json({ error: 'Invalid invite code' })
+    if (user.invites_used >= user.invite_slots) return res.status(403).json({ error: 'This invite code has no slots remaining' })
+    referrer = user
+  }
 
   if (!referrer) {
     return res.status(403).json({ error: 'Invalid invite code' })
-  }
-
-  // Check referrer has slots available
-  if (referrer.invites_used >= referrer.invite_slots) {
-    return res.status(403).json({ error: 'This invite code has no slots remaining' })
   }
 
   // Generate unique referral_code for new user (permanent, for their profile)
@@ -102,6 +122,14 @@ router.post('/register', async (req, res) => {
   if (error) {
     console.error('[register]', error)
     return res.status(500).json({ error: 'Failed to register' })
+  }
+
+  // Mark invite code as used if it came from invite_codes table
+  if (invite) {
+    await supabase
+      .from('invite_codes')
+      .update({ is_used: true, used_by_fid: fid, used_at: new Date().toISOString() })
+      .eq('id', invite.id)
   }
 
   // Burn referrer's current active_invite_code and generate new one for next slot
