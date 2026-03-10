@@ -2,6 +2,7 @@ const express  = require('express')
 const router   = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAuth } = require('../middleware/auth')
+const { generateReferralCode } = require('../lib/referral')
 
 // GET /referral/my
 router.get('/my', requireAuth, async (req, res) => {
@@ -24,8 +25,7 @@ router.get('/my', requireAuth, async (req, res) => {
   const totalPoints = refs?.reduce((s, r) => s + r.points_earned, 0) || 0
 
   return res.json({
-    referral_code:        user.referral_code,
-    referral_link:        `https://node.praxis.app/r/${user.referral_code}`,
+    active_invite_code:   user.active_invite_code,
     slots_total:          user.invite_slots,
     slots_used:           user.invites_used,
     slots_left:           user.invite_slots - user.invites_used,
@@ -44,18 +44,50 @@ router.get('/my', requireAuth, async (req, res) => {
 
 // GET /referral/resolve/:code
 router.get('/resolve/:code', async (req, res) => {
+  const code = req.params.code.toUpperCase()
+
   const { data: user } = await supabase
     .from('users')
-    .select('fid, username, display_name, pfp_url, tier, invite_slots, invites_used')
-    .eq('referral_code', req.params.code.toUpperCase())
+    .select('fid, username, display_name, pfp_url, tier, invite_slots, invites_used, active_invite_code')
+    .eq('active_invite_code', code)
     .single()
 
-  if (!user) return res.status(404).json({ error: 'Invalid referral code' })
+  if (!user) return res.status(404).json({ valid: false, error: 'Invalid invite code' })
 
   const slotsLeft = user.invite_slots - user.invites_used
-  if (slotsLeft <= 0) return res.status(403).json({ error: 'This code has no slots remaining' })
+  if (slotsLeft <= 0) return res.status(403).json({ valid: false, error: 'This code has no slots remaining' })
 
   return res.json({ valid: true, slots_left: slotsLeft, referrer: user })
+})
+
+// POST /referral/refresh — user manually refreshes their invite code
+router.post('/refresh', requireAuth, async (req, res) => {
+  const user = req.user
+
+  const slotsLeft = user.invite_slots - user.invites_used
+  if (slotsLeft <= 0) {
+    return res.status(403).json({ error: 'No invite slots remaining' })
+  }
+
+  // Generate new unique code
+  let newCode, tries = 0
+  do {
+    newCode = generateReferralCode()
+    const { data: clash } = await supabase
+      .from('users')
+      .select('id')
+      .eq('active_invite_code', newCode)
+      .single()
+    if (!clash) break
+    tries++
+  } while (tries < 5)
+
+  await supabase
+    .from('users')
+    .update({ active_invite_code: newCode })
+    .eq('id', user.id)
+
+  return res.json({ success: true, active_invite_code: newCode })
 })
 
 module.exports = router

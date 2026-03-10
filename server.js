@@ -11,6 +11,7 @@ const leaderboardRouter = require('./routes/leaderboard')
 const referralRouter    = require('./routes/referral')
 
 const app  = express()
+app.set('trust proxy', 1)
 const PORT = process.env.PORT || 3000
 
 app.set('trust proxy', 1)

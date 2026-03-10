@@ -7,7 +7,7 @@ const { INVITE_SLOTS } = require('../lib/points')
 
 // POST /user/register
 router.post('/register', async (req, res) => {
-  const { fid, wallet, username, display_name, pfp_url, referral_code } = req.body
+  const { fid, wallet, username, display_name, pfp_url, invite_code } = req.body
 
   if (!fid || !wallet) {
     return res.status(400).json({ error: 'fid and wallet are required' })
@@ -26,16 +26,16 @@ router.post('/register', async (req, res) => {
     return res.status(409).json({ error: 'Already registered', user_id: existing.id })
   }
 
-  // Referral code is REQUIRED
-  if (!referral_code) {
+  // Invite code is REQUIRED
+  if (!invite_code) {
     return res.status(403).json({ error: 'Invite code required — get one from an existing member' })
   }
 
-  // Validate referral code
+  // Validate invite code against active_invite_code
   const { data: referrer } = await supabase
     .from('users')
-    .select('id, tier, invite_slots, invites_used')
-    .eq('referral_code', referral_code.toUpperCase())
+    .select('id, tier, invite_slots, invites_used, active_invite_code')
+    .eq('active_invite_code', invite_code.toUpperCase())
     .single()
 
   if (!referrer) {
@@ -47,7 +47,7 @@ router.post('/register', async (req, res) => {
     return res.status(403).json({ error: 'This invite code has no slots remaining' })
   }
 
-  // Generate unique referral code
+  // Generate unique referral_code for new user (permanent, for their profile)
   let myCode, tries = 0
   do {
     myCode = generateReferralCode()
@@ -60,21 +60,41 @@ router.post('/register', async (req, res) => {
     tries++
   } while (tries < 5)
 
-  // Insert user
+  // New user starts with 0 invite slots (Bronze)
+  const newInviteSlots = INVITE_SLOTS['bronze'] || 0
+
+  // Generate active_invite_code for new user if they have slots
+  let newActiveCode = null
+  if (newInviteSlots > 0) {
+    let atries = 0
+    do {
+      newActiveCode = generateReferralCode()
+      const { data: clash } = await supabase
+        .from('users')
+        .select('id')
+        .eq('active_invite_code', newActiveCode)
+        .single()
+      if (!clash) break
+      atries++
+    } while (atries < 5)
+  }
+
+  // Insert new user
   const { data: user, error } = await supabase
     .from('users')
     .insert({
       fid,
-      wallet:        walletLower,
-      username:      username || null,
-      display_name:  display_name || null,
-      pfp_url:       pfp_url || null,
-      tier:          'bronze',
-      points:        0,
-      referral_code: myCode,
-      referred_by:   referrer.id,
-      invite_slots:  0,
-      invites_used:  0
+      wallet:             walletLower,
+      username:           username || null,
+      display_name:       display_name || null,
+      pfp_url:            pfp_url || null,
+      tier:               'bronze',
+      points:             0,
+      referral_code:      myCode,
+      active_invite_code: newActiveCode,
+      referred_by:        referrer.id,
+      invite_slots:       newInviteSlots,
+      invites_used:       0
     })
     .select()
     .single()
@@ -84,10 +104,31 @@ router.post('/register', async (req, res) => {
     return res.status(500).json({ error: 'Failed to register' })
   }
 
-  // Increment referrer invites_used
+  // Burn referrer's current active_invite_code and generate new one for next slot
+  const newSlotsUsed = referrer.invites_used + 1
+  const slotsRemaining = referrer.invite_slots - newSlotsUsed
+
+  let newReferrerCode = null
+  if (slotsRemaining > 0) {
+    let rtries = 0
+    do {
+      newReferrerCode = generateReferralCode()
+      const { data: clash } = await supabase
+        .from('users')
+        .select('id')
+        .eq('active_invite_code', newReferrerCode)
+        .single()
+      if (!clash) break
+      rtries++
+    } while (rtries < 5)
+  }
+
   await supabase
     .from('users')
-    .update({ invites_used: referrer.invites_used + 1 })
+    .update({
+      invites_used:       newSlotsUsed,
+      active_invite_code: newReferrerCode  // null if no slots left
+    })
     .eq('id', referrer.id)
 
   // Create referral record
@@ -138,8 +179,8 @@ router.get('/me', requireAuth, async (req, res) => {
       can_claim:       lastClaim ? new Date(lastClaim.next_claim_at) <= new Date() : false
     },
     referrals: {
-      count:        refCount || 0,
-      slots_left:   user.invite_slots - user.invites_used
+      count:      refCount || 0,
+      slots_left: user.invite_slots - user.invites_used
     }
   })
 })
