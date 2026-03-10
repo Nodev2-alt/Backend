@@ -1,0 +1,159 @@
+const express  = require('express')
+const router   = express.Router()
+const supabase = require('../lib/supabase')
+const { requireAuth } = require('../middleware/auth')
+const { generateReferralCode } = require('../lib/referral')
+const { INVITE_SLOTS } = require('../lib/points')
+
+// POST /user/register
+router.post('/register', async (req, res) => {
+  const { fid, wallet, username, display_name, pfp_url, referral_code } = req.body
+
+  if (!fid || !wallet) {
+    return res.status(400).json({ error: 'fid and wallet are required' })
+  }
+
+  const walletLower = wallet.toLowerCase()
+
+  // Check already registered
+  const { data: existing } = await supabase
+    .from('users')
+    .select('id')
+    .eq('fid', fid)
+    .single()
+
+  if (existing) {
+    return res.status(409).json({ error: 'Already registered', user_id: existing.id })
+  }
+
+  // Referral code is REQUIRED
+  if (!referral_code) {
+    return res.status(403).json({ error: 'Invite code required — get one from an existing member' })
+  }
+
+  // Validate referral code
+  const { data: referrer } = await supabase
+    .from('users')
+    .select('id, tier, invite_slots, invites_used')
+    .eq('referral_code', referral_code.toUpperCase())
+    .single()
+
+  if (!referrer) {
+    return res.status(403).json({ error: 'Invalid invite code' })
+  }
+
+  // Check referrer has slots available
+  if (referrer.invites_used >= referrer.invite_slots) {
+    return res.status(403).json({ error: 'This invite code has no slots remaining' })
+  }
+
+  // Generate unique referral code
+  let myCode, tries = 0
+  do {
+    myCode = generateReferralCode()
+    const { data: clash } = await supabase
+      .from('users')
+      .select('id')
+      .eq('referral_code', myCode)
+      .single()
+    if (!clash) break
+    tries++
+  } while (tries < 5)
+
+  // Insert user
+  const { data: user, error } = await supabase
+    .from('users')
+    .insert({
+      fid,
+      wallet:        walletLower,
+      username:      username || null,
+      display_name:  display_name || null,
+      pfp_url:       pfp_url || null,
+      tier:          'bronze',
+      points:        0,
+      referral_code: myCode,
+      referred_by:   referrer.id,
+      invite_slots:  0,
+      invites_used:  0
+    })
+    .select()
+    .single()
+
+  if (error) {
+    console.error('[register]', error)
+    return res.status(500).json({ error: 'Failed to register' })
+  }
+
+  // Increment referrer invites_used
+  await supabase
+    .from('users')
+    .update({ invites_used: referrer.invites_used + 1 })
+    .eq('id', referrer.id)
+
+  // Create referral record
+  await supabase.from('referrals').insert({
+    referrer_id:   referrer.id,
+    referee_id:    user.id,
+    usdc_earned:   0,
+    points_earned: 0
+  })
+
+  return res.json({ success: true, user })
+})
+
+// GET /user/me
+router.get('/me', requireAuth, async (req, res) => {
+  const user = req.user
+
+  const { data: lastClaim } = await supabase
+    .from('claims')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('claimed_at', { ascending: false })
+    .limit(1)
+    .single()
+
+  const { data: activeSession } = await supabase
+    .from('node_sessions')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('is_active', true)
+    .single()
+
+  const { count: refCount } = await supabase
+    .from('referrals')
+    .select('id', { count: 'exact' })
+    .eq('referrer_id', user.id)
+
+  return res.json({
+    user,
+    node: {
+      is_active:   !!activeSession,
+      started_at:  activeSession?.started_at || null,
+      session_pts: activeSession?.points_earned || 0
+    },
+    claim: {
+      last_claimed_at: lastClaim?.claimed_at || null,
+      next_claim_at:   lastClaim?.next_claim_at || null,
+      can_claim:       lastClaim ? new Date(lastClaim.next_claim_at) <= new Date() : false
+    },
+    referrals: {
+      count:        refCount || 0,
+      slots_left:   user.invite_slots - user.invites_used
+    }
+  })
+})
+
+// GET /user/:fid
+router.get('/:fid', async (req, res) => {
+  const { data: user } = await supabase
+    .from('users')
+    .select('fid, username, display_name, pfp_url, tier, points')
+    .eq('fid', req.params.fid)
+    .single()
+
+  if (!user) return res.status(404).json({ error: 'User not found' })
+  return res.json({ user })
+})
+
+module.exports = router
