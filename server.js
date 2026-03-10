@@ -13,8 +13,10 @@ const referralRouter    = require('./routes/referral')
 const app  = express()
 const PORT = process.env.PORT || 3000
 
+app.set('trust proxy', 1)
+
 app.use(cors({
-  origin: ['https://praxis-indol.vercel.app', 'http://localhost:5173'],
+  origin: ['https://nodev2-theta.vercel.app', 'http://localhost:5173'],
   methods: ['GET', 'POST', 'PUT'],
   allowedHeaders: ['Content-Type', 'x-fid', 'x-wallet']
 }))
@@ -63,3 +65,4 @@ app.listen(PORT, () => {
   console.log(`   Owner wallet: ${process.env.OWNER_WALLET}`)
   console.log(`   Supabase:     ${process.env.SUPABASE_URL}\n`)
 })
+
