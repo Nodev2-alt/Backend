@@ -26,10 +26,7 @@ router.post('/register', async (req, res) => {
     return res.status(409).json({ error: 'Already registered', user_id: existing.id })
   }
 
-  // Invite code is REQUIRED
-  if (!invite_code) {
-    return res.status(403).json({ error: 'Invite code required — get one from an existing member' })
-  }
+  // Invite code is OPTIONAL
 
   // Check invite_codes table first
   const { data: invite } = await supabase
@@ -39,6 +36,16 @@ router.post('/register', async (req, res) => {
     .single()
 
   let referrer = null
+  let invite = null
+
+  if (invite_code) {
+    const { data: inviteData } = await supabase
+      .from('invite_codes')
+      .select('id, owner_fid, is_used')
+      .eq('code', invite_code.toUpperCase())
+      .single()
+    invite = inviteData
+  }
 
   if (invite) {
     if (invite.is_used) {
