@@ -198,3 +198,45 @@ router.get('/:fid', async (req, res) => {
 })
 
 module.exports = router
+
+// POST /user/link-referrer
+router.post('/link-referrer', requireAuth, async (req, res) => {
+  const user = req.user
+  if (user.referred_by) return res.status(400).json({ error: 'Already linked to a referrer' })
+
+  const { invite_code } = req.body
+  if (!invite_code) return res.status(400).json({ error: 'invite_code required' })
+
+  // Check invite_codes table
+  const { data: invite } = await supabase
+    .from('invite_codes')
+    .select('id, owner_fid, is_used')
+    .eq('code', invite_code.trim().toUpperCase())
+    .single()
+
+  let referrer = null
+  if (invite && !invite.is_used) {
+    const { data: owner } = await supabase
+      .from('users')
+      .select('id')
+      .eq('fid', invite.owner_fid)
+      .single()
+    referrer = owner
+    await supabase.from('invite_codes').update({ is_used: true, used_by_fid: user.fid, used_at: new Date().toISOString() }).eq('id', invite.id)
+  } else {
+    const { data: userRef } = await supabase
+      .from('users')
+      .select('id, invite_slots, invites_used, active_invite_code')
+      .eq('active_invite_code', invite_code.trim().toUpperCase())
+      .single()
+    if (!userRef) return res.status(403).json({ error: 'Invalid or already used code' })
+    if (userRef.invites_used >= userRef.invite_slots) return res.status(403).json({ error: 'No slots remaining' })
+    referrer = userRef
+    await supabase.from('users').update({ invites_used: userRef.invites_used + 1 }).eq('id', userRef.id)
+  }
+
+  await supabase.from('users').update({ referred_by: referrer.id }).eq('id', user.id)
+  await supabase.from('referrals').insert({ referrer_id: referrer.id, referee_id: user.id, usdc_earned: 0, points_earned: 0 })
+
+  return res.json({ success: true })
+})
